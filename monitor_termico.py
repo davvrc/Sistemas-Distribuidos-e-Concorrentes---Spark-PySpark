@@ -1,8 +1,4 @@
 import os, time, math, random
-if os.name == "nt" and os.path.isdir(r"C:\hadoop\bin"):          
-    os.environ.setdefault("HADOOP_HOME", r"C:\hadoop")
-    os.environ["PATH"] = r"C:\hadoop\bin;" + os.environ["PATH"]
-
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.functions import col, window, lit, rand
@@ -17,13 +13,12 @@ amp = [random.uniform(4, 14) for _ in ZONAS]          # quanto a zona pode esque
 periodo = [random.uniform(35, 70) for _ in ZONAS]     # segundos para um ciclo completo
 fase = [random.uniform(0, 2 * math.pi) for _ in ZONAS]
 
-# Para a demonstração sempre ter um alerta: uma zona sorteada esquenta bastante,
-# com o pico entre 40 s e 70 s depois do início.
+# forçar o pico entre 40 s e 70 s depois do início.
 critica = random.randrange(len(ZONAS))
 amp[critica] = random.uniform(18, 22)
 fase[critica] = math.pi / 2 - 2 * math.pi * random.uniform(40, 70) / periodo[critica]
 
-# [SPARK] 1) Sessão: "local[4]" simula um cluster com 4 workers
+# [SPARK] 1) Sessão: "local[4]" simula um cluster com 4 workers. Conceitos de Cluster Manager e Spark Session.
 spark = (SparkSession.builder.appName("MonitorSimples").master("local[4]")
          .config("spark.sql.shuffle.partitions", "4")
          .config("spark.ui.showConsoleProgress", "false").getOrCreate())
@@ -34,7 +29,9 @@ def por_zona(valores):
     """Vira uma coluna Spark: o valor de cada zona escolhido pelo número da zona."""
     return F.element_at(F.array(*[lit(v) for v in valores]), col("zona"))
 
-# [SPARK] 2) Fluxo de leituras simuladas (igual ao PDF): 1000 leituras/s de 100 sensores
+# [SPARK] 2) Fluxo de leituras simuladas: 1000 leituras/s de 100 sensores. Essa parte do codigo é onde entra em pratica a parte simulada do projeto.
+# "spark.readStream.format("rate").option("rowsPerSecond", 1000)" Gera 1000 linhas de dados que são distribuidos entre os 100 sensores. 
+# Simulando os dados extraidos dos sensores espalhados na fabrica em um cenario hipotetico. 
 sensores = (spark.readStream.format("rate").option("rowsPerSecond", 1000).load()
             .withColumn("sensor_id", col("value") % 100)
             .withColumn("zona", (col("sensor_id") % 4 + 1).cast("int"))
@@ -44,7 +41,9 @@ onda = (F.sin(col("segundos") * 2 * math.pi / por_zona(periodo) + por_zona(fase)
 leituras = sensores.withColumn(
     "temperatura", por_zona(base) + por_zona(amp) * onda + (rand() - 0.5) * 2)
 
-# [SPARK] 3) Estatísticas por zona numa janela deslizante de 30 s (passo de 5 s), como no PDF
+# [SPARK] 3) Estatísticas por zona numa janela deslizante de 30 s (passo de 5 s). Conceito de Janela Deslizante (30s) aplicada. Fast Data.
+# Stateful Streaming. Dados são acessados em velocidade de memoria RAM, por isso consegue manter esse fluxo de processamento tao rapido. 
+# ".agg(F.avg("temperatura").alias("media")" Fase de Shuffle. Spark reorganiza os dados com base nas zonas, e enviando pro worker responsavel. 
 medias = (leituras
           .withWatermark("timestamp", "10 seconds")                       # tolera dados atrasados
           .groupBy(window("timestamp", "30 seconds", "5 seconds").alias("janela"), "zona")
@@ -54,7 +53,8 @@ medias = (leituras
                F.count("*").alias("leituras"),
                F.approx_count_distinct("sensor_id").alias("sensores")))
 
-# [SPARK] 4) Sink "memory": o resultado vira uma tabela SQL, consultável enquanto o fluxo roda
+# [SPARK] 4) Sink "memory": o resultado vira uma tabela SQL, consultável enquanto o fluxo roda. Isso só é possivel graças ao RDD e o conceito de 
+# Processar dados a partir da memoria RAM ao invés de leituras/escritas em disco rigidos. 
 consulta = (medias.writeStream.queryName("medias_zonas")
             .format("memory").outputMode("complete").start())
 
